@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"   stop-color="#1E40AF"/>
+      <stop offset="100%" stop-color="#1E3A8A"/>
+    </linearGradient>
+    <linearGradient id="leaf1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"   stop-color="#6EE7B7"/>
+      <stop offset="50%"  stop-color="#10B981"/>
+      <stop offset="100%" stop-color="#047857"/>
+    </linearGradient>
+    <linearGradient id="leaf2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"   stop-color="#34D399"/>
+      <stop offset="100%" stop-color="#065F46"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="0%" y1="0%" x2="60%" y2="60%">
+      <stop offset="0%"   stop-color="#ffffff" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="stem" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"   stop-color="#34D399"/>
+      <stop offset="100%" stop-color="#065F46"/>
+    </linearGradient>
+    <filter id="drop" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#047857" flood-opacity="0.4"/>
+    </filter>
+  </defs>
+
+  <!-- Fundo -->
+  <rect width="512" height="512" rx="96" fill="url(#bg)"/>
+
+  <!-- Sombra da folha -->
+  <ellipse cx="256" cy="440" rx="90" ry="16" fill="#000" opacity="0.18"/>
+
+  <!-- Caule -->
+  <path d="M256 430 C256 430 240 360 210 300" stroke="url(#stem)" stroke-width="18"
+        stroke-linecap="round" fill="none" filter="url(#drop)"/>
+
+  <!-- Folha principal -->
+  <path d="M210 300
+           C150 210 120 80 256 60
+           C392 80 362 215 256 280
+           C240 295 210 300 210 300Z"
+        fill="url(#leaf1)" filter="url(#drop)"/>
+
+  <!-- Nervura central -->
+  <path d="M210 300 C228 240 242 150 256 68"
+        stroke="#065F46" stroke-width="7" stroke-linecap="round" fill="none" opacity="0.55"/>
+
+  <!-- Nervuras laterais -->
+  <path d="M234 228 C195 205 168 198 152 190" stroke="#065F46" stroke-width="5" stroke-linecap="round" fill="none" opacity="0.4"/>
+  <path d="M243 178 C208 160 184 153 168 146" stroke="#065F46" stroke-width="5" stroke-linecap="round" fill="none" opacity="0.4"/>
+  <path d="M248 132 C222 118 204 112 190 106" stroke="#065F46" stroke-width="4" stroke-linecap="round" fill="none" opacity="0.35"/>
+
+  <!-- Brilho na folha principal -->
+  <path d="M210 300
+           C150 210 120 80 256 60
+           C392 80 362 215 256 280
+           C240 295 210 300 210 300Z"
+        fill="url(#shine)"/>
+
+  <!-- Folhinha secundária direita -->
+  <path d="M256 340
+           C310 295 385 285 390 230
+           C330 225 258 272 256 340Z"
+        fill="url(#leaf2)" opacity="0.9" filter="url(#drop)"/>
+  <path d="M256 340
+           C310 295 385 285 390 230
+           C330 225 258 272 256 340Z"
+        fill="url(#shine)" opacity="0.6"/>
+</svg>

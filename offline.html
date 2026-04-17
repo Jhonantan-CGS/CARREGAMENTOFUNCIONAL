@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sem Conexão — Cysy Fertilizantes</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@700;800&family=Inter:wght@400;500&display=swap');
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #1E3A8A 0%, #1E40AF 100%);
+    color: #fff;
+    font-family: 'Inter', system-ui, sans-serif;
+    padding: 32px 24px;
+    text-align: center;
+    gap: 0;
+  }
+  .icon-wrap {
+    width: 100px;
+    height: 100px;
+    background: rgba(255,255,255,0.1);
+    border: 2px solid rgba(255,255,255,0.2);
+    border-radius: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 32px;
+    backdrop-filter: blur(8px);
+  }
+  h1 {
+    font-family: 'Montserrat', sans-serif;
+    font-size: 26px;
+    font-weight: 800;
+    margin-bottom: 12px;
+    letter-spacing: -0.5px;
+  }
+  p {
+    font-size: 15px;
+    opacity: 0.85;
+    line-height: 1.6;
+    max-width: 320px;
+    margin-bottom: 36px;
+  }
+  .card {
+    background: rgba(255,255,255,0.1);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 16px;
+    padding: 20px 24px;
+    max-width: 340px;
+    width: 100%;
+    text-align: left;
+    margin-bottom: 32px;
+    backdrop-filter: blur(8px);
+  }
+  .card h3 {
+    font-family: 'Montserrat', sans-serif;
+    font-size: 13px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    opacity: 0.7;
+    margin-bottom: 12px;
+  }
+  .card ul { list-style: none; display: flex; flex-direction: column; gap: 8px; }
+  .card li { font-size: 14px; display: flex; align-items: center; gap: 10px; }
+  .card li span { font-size: 18px; }
+  button {
+    background: #10B981;
+    color: white;
+    border: none;
+    border-radius: 12px;
+    padding: 16px 36px;
+    font-family: 'Montserrat', sans-serif;
+    font-size: 15px;
+    font-weight: 800;
+    cursor: pointer;
+    box-shadow: 0 4px 20px rgba(16,185,129,0.4);
+    transition: transform 0.2s, box-shadow 0.2s;
+    width: 100%;
+    max-width: 300px;
+  }
+  button:hover { transform: translateY(-2px); box-shadow: 0 6px 24px rgba(16,185,129,0.5); }
+  .brand {
+    margin-top: 40px;
+    font-size: 12px;
+    opacity: 0.4;
+    font-family: 'Montserrat', sans-serif;
+    font-weight: 700;
+    letter-spacing: 1px;
+  }
+</style>
+</head>
+<body>
+
+  <div class="icon-wrap">
+    <svg width="56" height="56" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M210 300 C150 210 120 80 256 60 C392 80 362 215 256 280 C240 295 210 300 210 300Z" fill="#10B981"/>
+      <path d="M210 300 C150 210 120 80 256 60 C392 80 362 215 256 280 C240 295 210 300 210 300Z" fill="rgba(255,255,255,0.2)"/>
+      <path d="M256 430 C256 430 240 360 210 300" stroke="#34D399" stroke-width="18" stroke-linecap="round"/>
+      <path d="M256 346 C308 302 382 292 386 238 C328 232 258 278 256 346Z" fill="#065F46" opacity="0.9"/>
+    </svg>
+  </div>
+
+  <h1>Você está offline</h1>
+  <p>O aplicativo Cysy Fertilizantes não conseguiu se conectar à internet. Seus dados locais ainda estão disponíveis.</p>
+
+  <div class="card">
+    <h3>O que você ainda pode fazer</h3>
+    <ul>
+      <li><span>📋</span> Preencher formulários de operação</li>
+      <li><span>📉</span> Registrar baixas de perdas</li>
+      <li><span>📤</span> Os envios ficam na fila e sincronizam ao voltar online</li>
+    </ul>
+  </div>
+
+  <button onclick="window.location.href='./index.html'">
+    🔄 Tentar abrir o app
+  </button>
+
+  <div class="brand">© 2026 CYSY FERTILIZANTES</div>
+
+</body>
+</html>
