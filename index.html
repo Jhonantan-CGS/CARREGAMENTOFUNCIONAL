@@ -663,7 +663,8 @@
     <p><strong>© 2026 Cysy Fertilizantes</strong> — Painel Logístico Avançado</p>
     <div class="credits">
       Desenvolvido por Jhonantan Cardoso Gonçalves<br>
-      📞 48 99215-9791
+      📞 48 99215-9791<br>
+      V 1.1
     </div>
   </footer>
 
@@ -755,6 +756,11 @@ const logPerf = (label, startedAt, extra = '') => {
 const normalizeName = (s) => String(s || '').toUpperCase().replace(/\s+/g, ' ').trim();
 // Normalização única para placa: remove separadores, espaços e força caixa alta.
 const normalizePlaca = (placa) => String(placa || '').toUpperCase().replace(/[\s-]+/g, '').replace(/[^A-Z0-9]/g, '').trim();
+const normalizePedido = (pedido) => String(pedido || '').toUpperCase().replace(/\s+/g, '').trim();
+const buildChecklistUniqueKey = ({ placaNormalizada = '', pedido = '', dataOperacao = '' } = {}) =>
+  `${normalizePlaca(placaNormalizada)}|${normalizePedido(pedido)}|${String(dataOperacao || '').trim()}`;
+const buildChecklistIdempotencyKey = ({ placaNormalizada = '', pedido = '', dataOperacao = '' } = {}) =>
+  `checklist:${buildChecklistUniqueKey({ placaNormalizada, pedido, dataOperacao })}`;
 const formatTons = (val) => { const n = parseBRNumber(val); return (isNaN(n) ? 0 : n).toFixed(3); };
 const escapeHTML = (str) => String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const extractPlaca = (obsStr) => { const match = /\b([A-Z]{3}-?[0-9][A-Z0-9][0-9]{2})\b/i.exec(obsStr || ''); return match ? match[1].toUpperCase() : ''; };
@@ -1100,6 +1106,7 @@ const debugEngine = {
 const dbManager = {
   dbName: 'CysyOfflineDB', storeName: 'pending_uploads', db: null, _isPrivateMode: false, _useLocalStorage: false,
   async init() {
+    if (this.db || this._useLocalStorage) return;
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         console.warn('[DB] IndexedDB timeout — usando fallback localStorage');
@@ -1136,27 +1143,27 @@ const dbManager = {
       }
     });
   },
+  async ensureReady() {
+    if (this.db || this._useLocalStorage) return;
+    await this.init();
+  },
   async savePending(type, payload) {
+    await this.ensureReady();
     if (this._useLocalStorage) {
-      // Fallback: localStorage
-      try {
-        const key = `cysy_pending_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-        const data = { id: key, type, payload, timestamp: Date.now(), status: 'pending', errorMsg: '' };
-        localStorage.setItem(key, JSON.stringify(data));
-        return;
-      } catch (e) {
-        console.error('[DB] localStorage também falhou:', e);
-        throw e;
-      }
+      const key = `cysy_pending_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      const data = { id: key, type, payload, timestamp: Date.now(), status: 'pending', errorMsg: '' };
+      localStorage.setItem(key, JSON.stringify(data));
+      return data;
     }
 
     return new Promise((resolve, reject) => {
       try {
         const tx = this.db.transaction(this.storeName, 'readwrite');
         const store = tx.objectStore(this.storeName);
-        const req = store.add({ type, payload, timestamp: Date.now(), status: 'pending', errorMsg: '' });
-        req.onsuccess = () => resolve();
-        req.onerror = () => reject();
+        const record = { type, payload, timestamp: Date.now(), status: 'pending', errorMsg: '' };
+        const req = store.add(record);
+        req.onsuccess = () => resolve({ ...record, id: req.result });
+        req.onerror = () => reject(req.error || new Error('Falha ao persistir envio pendente'));
       } catch (e) {
         console.warn('[DB] savePending erro — tentando localStorage:', e);
         this._useLocalStorage = true;
@@ -1165,6 +1172,16 @@ const dbManager = {
     });
   },
   async updatePendingStatus(id, status, errorMsg = '') {
+    await this.ensureReady();
+    if (this._useLocalStorage) {
+      const current = this.getLocalPendingById(id);
+      if (!current) return;
+      current.status = status;
+      current.errorMsg = errorMsg;
+      current.updatedAt = Date.now();
+      localStorage.setItem(String(id), JSON.stringify(current));
+      return;
+    }
     return new Promise((resolve, reject) => {
       const tx = this.db.transaction(this.storeName, 'readwrite');
       const store = tx.objectStore(this.storeName);
@@ -1177,12 +1194,20 @@ const dbManager = {
         store.put(item);
         resolve();
       };
-      getReq.onerror = () => reject();
+      getReq.onerror = () => reject(getReq.error || new Error('Falha ao atualizar status pendente'));
     });
   },
+  getLocalPendingById(id) {
+    try {
+      const raw = localStorage.getItem(String(id));
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  },
   async getAllPending() {
+    await this.ensureReady();
     if (this._useLocalStorage) {
-      // Fallback: ler localStorage
       try {
         const items = [];
         for (let i = 0; i < localStorage.length; i++) {
@@ -1216,12 +1241,17 @@ const dbManager = {
     });
   },
   async deletePending(id) {
+    await this.ensureReady();
+    if (this._useLocalStorage) {
+      localStorage.removeItem(String(id));
+      return;
+    }
     return new Promise((resolve, reject) => {
       const tx = this.db.transaction(this.storeName, 'readwrite');
       const store = tx.objectStore(this.storeName);
       const req = store.delete(id);
       req.onsuccess = () => resolve();
-      req.onerror = () => reject();
+      req.onerror = () => reject(req.error || new Error('Falha ao remover pendência'));
     });
   },
   async getPendingOperacaoByPlacaDataTipo(placaNormalizada, dataOperacao, tipoChecklist = 'OPERACAO') {
@@ -1509,34 +1539,79 @@ const checklistGuardManager = {
     const next = [{ when: new Date().toISOString(), ...payload }, ...current].slice(0, 150);
     this._writeJson(this.storageKeys.attempts, next);
   },
-  async verificarDuplicidadeChecklist({ placaNormalizada, dataOperacao, tipoChecklist, hashChecklist }) {
+  async verificarDuplicidadeChecklist({ placaNormalizada, dataOperacao, tipoChecklist, hashChecklist, pedido }) {
     const placa = normalizePlaca(placaNormalizada);
+    const uniqueKey = buildChecklistUniqueKey({ placaNormalizada: placa, pedido, dataOperacao });
     const localHashHistory = this._readJson(this.storageKeys.history, []);
     const localRecentHash = localHashHistory.find(item =>
       normalizePlaca(item.placaNormalizada) === placa &&
       item.dataOperacao === dataOperacao &&
       item.tipoChecklist === tipoChecklist &&
-      item.hashChecklist === hashChecklist &&
-      (Date.now() - Number(item.timestamp || 0)) <= (30 * 60 * 1000)
+      (
+        item.uniqueKey === uniqueKey ||
+        item.hashChecklist === hashChecklist
+      ) &&
+      (Date.now() - Number(item.timestamp || 0)) <= (24 * 60 * 60 * 1000)
     );
     if (localRecentHash) {
       return {
         duplicated: true,
-        reason: 'Hash idêntico enviado recentemente para a mesma placa.',
-source: 'hash-local',
+        reason: 'Já existe checklist registrado hoje para a mesma placa e pedido.',
+        source: 'unique-key-local',
         lockedBy: localRecentHash.usuarioNomeCompleto || 'Não identificado',
         occurredAt: localRecentHash.timestamp,
         status: localRecentHash.status || this.checklistStatus.SINCRONIZADO
       };
     }
 
+    const pendingItems = await dbManager.getPendingOperacaoByPlacaDataTipo(placa, dataOperacao, tipoChecklist).catch(() => []);
+    const localPending = (pendingItems || []).find(item => {
+      const payload = item?.payload || {};
+      const pendingKey = payload.uniqueChecklistKey || buildChecklistUniqueKey({
+        placaNormalizada: payload.placaNormalizada || payload.placa,
+        pedido: payload.pedido,
+        dataOperacao: payload.dataOperacao
+      });
+      return pendingKey === uniqueKey;
+    });
+    if (localPending) {
+      return {
+        duplicated: true,
+        reason: 'Já existe um envio em processamento para a mesma placa e pedido hoje.',
+        source: 'pending-local',
+        lockedBy: localPending?.payload?.usuarioNomeCompleto || localPending?.payload?.acompanhamento || 'Não identificado',
+        occurredAt: localPending?.timestamp || Date.now(),
+        status: localPending?.status || this.checklistStatus.EM_ENVIO
+      };
+    }
+
+    const remoteDuplicate = await apiService.verificarDuplicidadeChecklist({
+      placaNormalizada: placa,
+      pedido,
+      dataOperacao,
+      tipoChecklist,
+      hashChecklist,
+      idempotencyKey: buildChecklistIdempotencyKey({ placaNormalizada: placa, pedido, dataOperacao })
+    });
+    if (remoteDuplicate?.supported && remoteDuplicate?.duplicated) {
+      return {
+        duplicated: true,
+        reason: remoteDuplicate.message || 'Já existe checklist registrado hoje para a mesma placa e pedido.',
+        source: 'remote',
+        lockedBy: remoteDuplicate.usuarioNomeCompleto || 'Não identificado',
+        occurredAt: remoteDuplicate.dataHora || Date.now(),
+        status: remoteDuplicate.status || this.checklistStatus.SINCRONIZADO
+      };
+    }
+
     return { duplicated: false, hashChecklist };
   },
-  registrarChecklistFinalizado({ placaNormalizada, dataOperacao, tipoChecklist, hashChecklist, usuarioNomeCompleto, status }) {
+  registrarChecklistFinalizado({ placaNormalizada, dataOperacao, tipoChecklist, hashChecklist, usuarioNomeCompleto, status, pedido }) {
     this._saveHashRecord({
       placaNormalizada: normalizePlaca(placaNormalizada),
       dataOperacao,
       tipoChecklist,
+      uniqueKey: buildChecklistUniqueKey({ placaNormalizada, pedido, dataOperacao }),
       hashChecklist,
       usuarioNomeCompleto,
       status: status || this.checklistStatus.SINCRONIZADO,
@@ -1548,10 +1623,17 @@ source: 'hash-local',
     const dataOperacao = payload?.dataOperacao || dateStampBR();
     const tipoChecklist = payload?.tipoChecklist || 'OPERACAO';
     const hashChecklist = await this.gerarHashChecklist(payload);
-    const duplicate = await this.verificarDuplicidadeChecklist({ placaNormalizada, dataOperacao, tipoChecklist, hashChecklist });
+    const duplicate = await this.verificarDuplicidadeChecklist({
+      placaNormalizada,
+      pedido: payload?.pedido || '',
+      dataOperacao,
+      tipoChecklist,
+      hashChecklist
+    });
     if (duplicate.duplicated) {
       this._registerDuplicateAttempt({
         placaNormalizada,
+        pedido: payload?.pedido || '',
         dataOperacao,
         tipoChecklist,
         hashChecklist,
@@ -1561,7 +1643,15 @@ source: 'hash-local',
         status: duplicate.status
       });
     }
-    return { duplicate, hashChecklist, placaNormalizada, dataOperacao, tipoChecklist };
+    return {
+      duplicate,
+      hashChecklist,
+      placaNormalizada,
+      dataOperacao,
+      tipoChecklist,
+      uniqueChecklistKey: buildChecklistUniqueKey({ placaNormalizada, pedido: payload?.pedido || '', dataOperacao }),
+      idempotencyKey: buildChecklistIdempotencyKey({ placaNormalizada, pedido: payload?.pedido || '', dataOperacao })
+    };
   }
 };
 window.checklistGuardManager = checklistGuardManager;
@@ -1665,14 +1755,14 @@ const cleanupManager = {
     btn.innerText = label || (isBusy ? '🧹 LIMPANDO...' : '🧹 Limpar Cache e Otimizar Sistema');
   },
 
-  _toast(message, tone = 'info') {
+  _toast(message, tone = 'info', durationMs = 5000) {
     const stack = document.getElementById('cleanupToastStack');
     if (!stack) return;
     const toast = document.createElement('div');
     toast.className = `cleanup-toast ${tone}`;
     toast.textContent = message;
     stack.appendChild(toast);
-    setTimeout(() => toast.remove(), 3600);
+    setTimeout(() => toast.remove(), durationMs);
   },
 
   _log(message, tone = 'info') {
@@ -1786,7 +1876,7 @@ const cleanupManager = {
         record,
         action: invalid || obsolete ? 'remove' : 'preserve',
         category: invalid ? 'órfão' : obsolete ? 'obsoleto' : 'crítico',
-        reason: invalid ? 'registro offline inválido' : obsolete ? 'registro já sincronizado ou arquivado' : 'fila offline ativa'
+        reason: invalid ? 'registro local inválido' : obsolete ? 'registro já sincronizado ou arquivado' : 'envio local ainda rastreado'
       });
     });
     const currentCacheNames = new Set([
@@ -2497,7 +2587,8 @@ const syncManager = {
     }
   },
   processQueue() {
-    console.log('[SYNC] Sistema online-only - fila removida');
+    if (!navigator.onLine) return Promise.resolve();
+    return submissionManager.processPendingQueue({ silent: true });
   }
 };
 
@@ -2785,33 +2876,7 @@ const swManager = {
     if (btn) btn.style.display = 'none';
   },
   async registerBackgroundSync() {
-    if (!('serviceWorker' in navigator) || !navigator.onLine) return false;
-    const registration = await navigator.serviceWorker.ready.catch(() => null);
-    if (!registration) return false;
-
-    // Background Sync convencional (Android/Chrome suportados).
-    if ('sync' in registration) {
-      try {
-        await registration.sync.register('cysy-sync-pending');
-        debugEngine.log('Background Sync registrado com sucesso.', 'success');
-      } catch (error) {
-        debugEngine.log(`Falha ao registrar Background Sync: ${error.message}`, 'warn');
-      }
-    }
-
-    // Periodic Sync (quando permitido pelo navegador).
-    if ('periodicSync' in registration) {
-      try {
-        const status = await navigator.permissions.query({ name: 'periodic-background-sync' }).catch(() => ({ state: 'prompt' }));
-        if (status.state === 'granted') {
-          await registration.periodicSync.register('cysy-periodic-sync', { minInterval: 8 * 60 * 60 * 1000 });
-          debugEngine.log('Periodic Background Sync registrado (8h).', 'success');
-        }
-      } catch (error) {
-        debugEngine.log(`Periodic Sync indisponível: ${error.message}`, 'warn');
-      }
-    }
-    return true;
+    return false;
   },
   _listenServiceWorkerMessages() {
     if (!('serviceWorker' in navigator)) return;
@@ -2835,27 +2900,52 @@ const swManager = {
 // MÓDULO: API SERVICE (REDE HTTP)
 // ==========================================
 const apiService = {
+  normalizeScriptResponse(resp, fallbackMessage = 'Resposta não estruturada do servidor') {
+    const raw = resp || {};
+    const success = Boolean(raw.success || raw.status === 'success' || raw.ok === true);
+    const duplicate = Boolean(raw.duplicate || raw.duplicated || raw.code === 'DUPLICATE_CHECKLIST');
+    const code = String(raw.code || (duplicate ? 'DUPLICATE_CHECKLIST' : success ? 'OK' : 'UNKNOWN')).toUpperCase();
+    return {
+      success,
+      duplicate,
+      message: raw.message || fallbackMessage,
+      code,
+      data: raw.data || raw.result || null,
+      supported: typeof raw.supported === 'boolean' ? raw.supported : undefined,
+      usuarioNomeCompleto: raw.usuarioNomeCompleto || raw.userName || '',
+      dataHora: raw.dataHora || raw.timestamp || '',
+      status: raw.status || ''
+    };
+  },
   async _postToScript(body, { allowNoCorsSuccess = true, signal = null } = {}) {
     if(!navigator.onLine) throw new Error("OFFLINE");
     try {
-      const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout AppScript")), 10000));
+      const headerTimeout = new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout AppScript")), 12000));
       const res = await Promise.race([fetch(config.api.scriptUrl, {
         method: "POST",
         headers: { "Content-Type": "text/plain;charset=utf-8" },
         signal,
         body: JSON.stringify(body)
-      }), timeoutPromise]);
-      const text = await res.text();
+      }), headerTimeout]);
+      // Timeout separado para leitura do body — evita travar indefinidamente
+      // após headers chegarem (causa raiz do bug de "salvando eternamente").
+      const bodyTimeout = new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout body read")), 10000));
+      const text = await Promise.race([res.text(), bodyTimeout]);
       try {
-        return JSON.parse(text);
+        return this.normalizeScriptResponse(JSON.parse(text), 'Resposta recebida do servidor');
       } catch {
-        return { success: res.ok, message: text || 'Resposta não estruturada do servidor', supported: false };
+        return this.normalizeScriptResponse({
+          success: res.ok,
+          message: text || 'Resposta não estruturada do servidor',
+          code: res.ok ? 'OK' : `HTTP_${res.status}`,
+          status: res.status
+        });
       }
     } catch (err) {
       if (err?.name === 'AbortError' || signal?.aborted) throw new Error('ABORTED');
       if (!allowNoCorsSuccess) throw err;
       try {
-        const noCorsTimeout = new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout no-cors")), 10000));
+        const noCorsTimeout = new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout no-cors")), 8000));
         await Promise.race([fetch(config.api.scriptUrl, {
           method: "POST",
           mode: "no-cors",
@@ -2863,7 +2953,7 @@ const apiService = {
           signal,
           body: JSON.stringify(body)
         }), noCorsTimeout]);
-        return { success: true, status: 'success', message: 'Túnel secundário utilizado.', supported: false };
+        return this.normalizeScriptResponse({ success: true, status: 'success', message: 'Túnel secundário utilizado.', supported: false });
       } catch (fallbackError) {
         if (fallbackError?.name === 'AbortError' || signal?.aborted) throw new Error('ABORTED');
         throw new Error("FALHA_TOTAL");
@@ -2934,22 +3024,25 @@ const apiService = {
     }
   },
   async sendDataToAppScript(payload) {
-    return this._postToScript(payload, { allowNoCorsSuccess: true });
+    const response = await this._postToScript(payload, { allowNoCorsSuccess: true });
+    return this.normalizeScriptResponse(response, 'Resposta recebida do servidor');
   },
-  async verificarDuplicidadeChecklist({ placaNormalizada, dataOperacao, tipoChecklist, hashChecklist }, options = {}) {
+  async verificarDuplicidadeChecklist({ placaNormalizada, pedido, dataOperacao, tipoChecklist, hashChecklist, idempotencyKey }, options = {}) {
     const payload = {
       action: 'CHECK_DUPLICATE_CHECKLIST',
       placaNormalizada: normalizePlaca(placaNormalizada),
+      pedido: String(pedido || ''),
       dataOperacao,
       tipoChecklist,
-      hashChecklist
+      hashChecklist,
+      idempotencyKey
     };
     try {
       const resp = await this._postToScript(payload, { allowNoCorsSuccess: false, signal: options.signal || null });
-      const inferredSupported = Object.prototype.hasOwnProperty.call(resp || {}, 'duplicated');
+      const inferredSupported = Object.prototype.hasOwnProperty.call(resp || {}, 'duplicated') || Object.prototype.hasOwnProperty.call(resp || {}, 'duplicate');
       return {
         supported: Boolean(typeof resp?.supported === 'boolean' ? resp.supported : inferredSupported),
-        duplicated: Boolean(resp?.duplicated),
+        duplicated: Boolean(resp?.duplicated || resp?.duplicate),
         message: resp?.message || '',
         usuarioNomeCompleto: resp?.usuarioNomeCompleto || '',
         dataHora: resp?.dataHora || '',
@@ -3767,21 +3860,19 @@ const uiBuilder = {
     const plateSet = this.historicoLookup?.byDatePlateSet?.get(this._todayDateKey());
     return Boolean(plateSet && plateSet.has(plate));
   },
-  verificarDuplicidadeNoHistorico(placaNormalizada, historicoData = null) {
+  verificarDuplicidadeNoHistorico(placaNormalizada, historicoData = null, pedido = '') {
     const p = normalizePlaca(placaNormalizada);
     if (!p) return false;
-    
-    // Usar dados do histórico fornecidos ou usar dados internos
+
     const historico = historicoData || this.historicoCargas || [];
     if (historico.length === 0) return false;
 
-    // Verificar apenas今天的 data (data atual do sistema)
     const hoje = this._todayDateKey();
-    
-    // Processar o histórico se necessário
+    // Normaliza pedido para comparação (remove espaços, maiúsculo)
+    const pedNorm = pedido ? String(pedido).trim().toUpperCase() : '';
+
     let rowsToday = [];
     if (historicoData) {
-      // Se passou dados externos, processar para hoje
       (historico || []).forEach((row) => {
         if (!row) return;
         const raw = row.join(' ');
@@ -3789,22 +3880,25 @@ const uiBuilder = {
         const rowPlacaNorm = normalizePlaca(raw);
         const dateMatch = rowStr.match(/\b\d{2}\/\d{2}\/\d{4}\b/);
         if (!dateMatch) return;
-        const dateKey = dateMatch[0];
-        if (dateKey === hoje) {
-          rowsToday.push({ rowStr, rowPlacaNorm });
+        if (dateMatch[0] === hoje) {
+          rowsToday.push({ rawStr: raw.toUpperCase(), rowStr, rowPlacaNorm });
         }
       });
     } else {
-      if (this._hasHistoricoPlateToday(p)) return true;
-      // Usar dados internos já processados
-      rowsToday = this._getHistoricoRowsToday();
-    }
-    
-    // Verificar se a placa já existe no histórico de hoje
-    for (const row of rowsToday) {
-      if (row.rowPlacaNorm.includes(p)) {
-        return true;
+      if (this._hasHistoricoPlateToday(p)) {
+        // Se não há pedido para cruzar, bloqueia pela placa sozinha
+        if (!pedNorm) return true;
       }
+      rowsToday = this._getHistoricoRowsToday().map(r => ({ ...r, rawStr: (r.rowStr || '').toUpperCase() }));
+    }
+
+    // Duplicidade = mesma placa hoje; se pedido informado, também deve coincidir
+    for (const row of rowsToday) {
+      if (!row.rowPlacaNorm.includes(p)) continue;
+      if (!pedNorm) return true; // sem pedido: só placa+data já bloqueia
+      // Com pedido: verifica se algum dos pedidos da chave aparece na linha do histórico
+      const pedidos = pedNorm.split('|').map(s => s.trim()).filter(Boolean);
+      if (pedidos.some(ped => row.rawStr.includes(ped))) return true;
     }
     return false;
   },
@@ -4252,11 +4346,11 @@ const uiBuilder = {
     // Check 1 — histórico na planilha (cargas do dia)
     const jaCarregouPlanilha = truckStatusManager.verificarSeJaCarregouPlanilha(placaNorm);
 
-    // Check 2 — fila offline pendente (ainda não sincronizada)
+    // Check 2 — envio ainda em processamento neste dispositivo
     const pendingPlacas = appController.currentPendingPlacas || [];
-    const jaCarregouOffline = pendingPlacas.some(p => normalizePlaca(p) === placaNorm);
+    const jaCarregouEmProcessamento = pendingPlacas.some(p => normalizePlaca(p) === placaNorm);
 
-    const duplicado = jaCarregouPlanilha || jaCarregouOffline;
+    const duplicado = jaCarregouPlanilha || jaCarregouEmProcessamento;
 
     if (!duplicado) {
       banner.style.display = 'none';
@@ -4266,7 +4360,7 @@ const uiBuilder = {
 
     const descFonte = jaCarregouPlanilha
       ? 'Registro localizado na planilha de histórico de carregamentos de hoje.'
-      : 'Registro localizado na fila de envios offline pendentes deste dispositivo.';
+      : 'Existe um envio ainda em processamento para esta placa neste dispositivo.';
     if (fonte) fonte.innerText = descFonte;
     banner.style.display = 'block';
     this._setButtons(true);
@@ -4682,6 +4776,110 @@ const uiBuilder = {
 // ==========================================
 // MÓDULO: GERENCIADOR DA FILA DE ENVIOS
 // ==========================================
+const submissionManager = {
+  activeJobs: new Set(),
+  async init() {
+    await dbManager.ensureReady();
+    await this.refreshPendingState();
+    await this.processPendingQueue({ silent: true });
+  },
+  async enqueue(payload) {
+    const record = await dbManager.savePending('OPERACAO', {
+      ...payload,
+      processingStartedAt: Date.now()
+    });
+    await this.refreshPendingState();
+    queueManager.render().catch(() => {});
+    return record;
+  },
+  async refreshPendingState() {
+    const pending = await dbManager.getAllPending().catch(() => []);
+    const operacoesAtivas = (pending || []).filter(item => item?.type === 'OPERACAO');
+    appController.currentPendingPlacas = operacoesAtivas
+      .filter(item => item.status !== 'success' && item.status !== checklistGuardManager.checklistStatus.SINCRONIZADO)
+      .map(item => normalizePlaca(item?.payload?.placaNormalizada || item?.payload?.placa))
+      .filter(Boolean);
+    queueManager._updateBadge(operacoesAtivas.length);
+    if (document.getElementById('tab-dash')?.classList.contains('active')) {
+      dashboardEngine.renderExecTable(appController.lastParsedData, appController.currentPendingPlacas || []);
+    }
+  },
+  async processPendingQueue({ silent = false } = {}) {
+    const pending = await dbManager.getAllPending().catch(() => []);
+    const items = (pending || [])
+      .filter(item => item?.type === 'OPERACAO')
+      .sort((a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0));
+
+    for (const item of items) {
+      const jobId = String(item.id);
+      if (this.activeJobs.has(jobId)) continue;
+      this.activeJobs.add(jobId);
+      try {
+        await this._processItem(item, { silent });
+      } finally {
+        this.activeJobs.delete(jobId);
+      }
+    }
+
+    await this.refreshPendingState();
+    queueManager.render().catch(() => {});
+  },
+  async _processItem(item, { silent = false } = {}) {
+    const payload = await userIdentityManager.attachUserToPayload(item.payload, { preserveExisting: true });
+    await dbManager.updatePendingStatus(item.id, checklistGuardManager.checklistStatus.EM_ENVIO, '');
+
+    try {
+      const response = await apiService.sendDataToAppScript(payload);
+      if (response.duplicate) {
+        await dbManager.deletePending(item.id);
+        checklistGuardManager.registrarChecklistFinalizado({
+          placaNormalizada: payload.placaNormalizada,
+          pedido: payload.pedido,
+          dataOperacao: payload.dataOperacao,
+          tipoChecklist: payload.tipoChecklist || 'OPERACAO',
+          hashChecklist: payload.hashChecklist,
+          usuarioNomeCompleto: payload.usuarioNomeCompleto || payload.acompanhamento || 'Operador',
+          status: checklistGuardManager.checklistStatus.SINCRONIZADO
+        });
+        checklistGuardManager.unlockChecklistPorPlaca(payload.placaNormalizada, { silent: true }).catch(() => {});
+        if (!silent) cleanupManager._toast(response.message || 'Checklist já registrado anteriormente.', 'warn', 12000);
+        return;
+      }
+
+      if (!response.success) {
+        await dbManager.updatePendingStatus(item.id, 'error', response.message || 'Falha ao enviar checklist');
+        checklistGuardManager.unlockChecklistPorPlaca(payload.placaNormalizada, { silent: true }).catch(() => {});
+        if (!silent) cleanupManager._toast(`❌ ${response.message || 'Falha ao enviar checklist.'}`, 'error', 15000);
+        return;
+      }
+
+      await dbManager.deletePending(item.id);
+      checklistGuardManager.registrarChecklistFinalizado({
+        placaNormalizada: payload.placaNormalizada,
+        pedido: payload.pedido,
+        dataOperacao: payload.dataOperacao,
+        tipoChecklist: payload.tipoChecklist || 'OPERACAO',
+        hashChecklist: payload.hashChecklist,
+        usuarioNomeCompleto: payload.usuarioNomeCompleto || payload.acompanhamento || 'Operador',
+        status: checklistGuardManager.checklistStatus.SINCRONIZADO
+      });
+      checklistGuardManager.unlockChecklistPorPlaca(payload.placaNormalizada, { silent: true }).catch(() => {});
+      uiBuilder.updateGlobalUpdateTimestamp();
+      appController.silentRefresh().catch(() => {});
+      if (!silent) cleanupManager._toast('✅ Checklist enviado com sucesso.', 'success', 10000);
+    } catch (error) {
+      const message = error?.message === 'OFFLINE'
+        ? 'Sem conexão com a internet.'
+        : error?.message === 'FALHA_TOTAL'
+          ? 'Servidor sem resposta confirmável após persistência.'
+          : error?.message || 'Falha na comunicação com o servidor.';
+      await dbManager.updatePendingStatus(item.id, 'error', message);
+      checklistGuardManager.unlockChecklistPorPlaca(payload.placaNormalizada, { silent: true }).catch(() => {});
+      if (!silent) cleanupManager._toast(`❌ ${message}`, 'error', 15000);
+    }
+  }
+};
+
 const queueManager = {
 
   async render() {
@@ -4712,7 +4910,7 @@ const queueManager = {
 
     // Resumo no topo
     html += `<div style="display:flex; gap:12px; margin-bottom:20px; flex-wrap:wrap;">`;
-    if (pendingCount > 0) html += `<div style="flex:1; background:var(--warning-bg); border:1px solid var(--warning); border-radius:var(--radius); padding:14px 18px; display:flex; align-items:center; gap:10px;"><span style="font-size:22px;">⏳</span><div><div style="font-size:20px; font-weight:800; color:#B45309; font-family:'Montserrat',sans-serif;">${pendingCount}</div><div style="font-size:11px; font-weight:700; color:#B45309; text-transform:uppercase;">Aguardando conexão</div></div></div>`;
+    if (pendingCount > 0) html += `<div style="flex:1; background:var(--warning-bg); border:1px solid var(--warning); border-radius:var(--radius); padding:14px 18px; display:flex; align-items:center; gap:10px;"><span style="font-size:22px;">⏳</span><div><div style="font-size:20px; font-weight:800; color:#B45309; font-family:'Montserrat',sans-serif;">${pendingCount}</div><div style="font-size:11px; font-weight:700; color:#B45309; text-transform:uppercase;">Em processamento</div></div></div>`;
     if (errorCount > 0)   html += `<div style="flex:1; background:var(--danger-bg); border:1px solid var(--danger); border-radius:var(--radius); padding:14px 18px; display:flex; align-items:center; gap:10px;"><span style="font-size:22px;">❌</span><div><div style="font-size:20px; font-weight:800; color:#991B1B; font-family:'Montserrat',sans-serif;">${errorCount}</div><div style="font-size:11px; font-weight:700; color:#991B1B; text-transform:uppercase;">Com erro — reenvio necessário</div></div></div>`;
     html += `</div>`;
 
@@ -4734,7 +4932,7 @@ const queueManager = {
         resumo = `<span><strong>Produtos:</strong> ${prods}</span> &nbsp;|&nbsp; <span><strong>Usuário:</strong> ${escapeHTML(usuarioRegistro)}</span>`;
       }
 
-      const statusLabel = isError ? '❌ Erro no envio' : '⏳ Aguardando conexão';
+      const statusLabel = isError ? '❌ Erro no envio' : '⏳ Em processamento';
       const borderColor = isError ? 'var(--danger)' : 'var(--warning)';
       const badgeBg = isError ? 'var(--danger-bg)' : 'var(--warning-bg)';
       const badgeColor = isError ? '#991B1B' : '#B45309';
@@ -4779,37 +4977,14 @@ const queueManager = {
       const pending = await dbManager.getAllPending();
       const item = pending.find(p => p.id === id);
       if (!item) { await this.render(); return; }
-
-      // Marca como pendente antes de tentar
       await dbManager.updatePendingStatus(id, 'pending', '');
-
-      const payload = await userIdentityManager.attachUserToPayload(item.payload, { preserveExisting: true });
-      const resp = await apiService.sendDataToAppScript(payload);
-      if (resp && resp.success) {
-        if (payload?.placaNormalizada && payload?.hashChecklist) {
-          checklistGuardManager.registrarChecklistFinalizado({
-            placaNormalizada: payload.placaNormalizada,
-            dataOperacao: payload.dataOperacao || dateStampBR(item.timestamp || Date.now()),
-            tipoChecklist: payload.tipoChecklist || 'OPERACAO',
-            hashChecklist: payload.hashChecklist,
-            usuarioNomeCompleto: payload.usuarioNomeCompleto || payload.acompanhamento || 'Operador',
-            status: checklistGuardManager.checklistStatus.SINCRONIZADO
-          });
-        }
-        await dbManager.deletePending(id);
-        debugEngine.log(`Registro ID ${id} reenviado com sucesso pelo operador.`, 'success');
-        alert('✅ Registro enviado com sucesso e integrado à planilha!');
-        appController.silentRefresh();
-      } else {
-        const errMsg = resp.message || 'Erro desconhecido do servidor';
-        await dbManager.updatePendingStatus(id, 'error', errMsg);
-        alert('❌ Falha no envio:\n\n' + errMsg);
-      }
+      await submissionManager._processItem(item, { silent: false });
     } catch(e) {
       await dbManager.updatePendingStatus(id, 'error', 'Falha na conexão com o servidor');
       alert('❌ Falha na conexão. Tente novamente.');
     } finally {
       uiBuilder.toggleLoader(false);
+      await submissionManager.refreshPendingState();
       await this.render();
       syncManager.updateStatus(navigator.onLine);
     }
@@ -4819,6 +4994,7 @@ const queueManager = {
     if (!confirm('Tem certeza que deseja remover este registro da fila?\n\nEsta ação não pode ser desfeita e o dado será perdido.')) return;
     await dbManager.deletePending(id);
     debugEngine.log(`Registro ID ${id} removido da fila pelo operador.`, 'warn');
+    await submissionManager.refreshPendingState();
     await this.render();
     syncManager.updateStatus(navigator.onLine);
   }
@@ -4919,8 +5095,10 @@ const appController = {
       await this.runInitStep('UI base', () => uiBuilder.init(), { critical: true });
       await this.runInitStep('Perdas controller', () => perdasController.init());
       await this.runInitStep('Restauração de snapshot quente', () => this.restoreWarmSnapshot());
+      await this.runInitStep('Banco local de envios', () => dbManager.init());
       await this.runInitStep('Inicialização de identidade', () => userIdentityManager.init());
       await this.runInitStep('Identificação do operador', () => userIdentityManager.ensureReady(), { timeoutMs: 30000 });
+      await this.runInitStep('Rastreador de envio', () => submissionManager.init(), { timeoutMs: 15000 });
       await this.runInitStep('Service Worker', () => swManager.init());
       await this.runInitStep('Monitor de conectividade', () => syncManager.init(), { timeoutMs: 5000 });
       await this.runInitStep('Limpeza inteligente', () => cleanupManager.init());
@@ -5061,7 +5239,7 @@ const appController = {
             }
         }
         
-this.currentPendingPlacas = [];
+        await submissionManager.refreshPendingState();
         this.bumpDataRevision('silent-refresh');
         this.persistWarmSnapshot();
 
@@ -5091,50 +5269,70 @@ async handleRefresh() {
       uiBuilder.setFatalError(false);
       
       const { rawValues, historicoRaw, rncRaw, rawEstoque, errors } = await this.fetchStartupDatasets();
-      if (!rawValues || rawValues.length === 0) {
-        throw new Error('A planilha principal não retornou dados.');
-      }
+
       if (errors.length) {
-        debugEngine.log(`[REFRESH] Carga parcial: ${errors.length} fonte(s) auxiliar(es) indisponível(is).`, 'warn');
+        debugEngine.log(`[REFRESH] Carga parcial: ${errors.length} fonte(s) indisponível(is): ${errors.map(e=>e.key).join(', ')}`, 'warn');
       }
 
+      if (!rawValues || rawValues.length === 0) {
+        // Tentar usar snapshot quente como fallback antes de mostrar erro fatal
+        const snapshot = warmSnapshotManager.read();
+        if (snapshot && snapshot.parsedData && snapshot.parsedData.length > 0) {
+          debugEngine.log('[REFRESH] API indisponível — usando snapshot quente como fallback.', 'warn');
+          uiBuilder.setFatalError(true, true, "DADOS EM CACHE", "Conexão com o servidor instável. Exibindo dados do último acesso. Atualize para tentar novamente.");
+          // Mesmo offline, renderiza com snapshot para não bloquear a interface
+          uiBuilder.populateSelects(snapshot.parsedData, uiBuilder.lotesMap);
+          dashboardEngine.renderBanners(snapshot.parsedData);
+          dashboardEngine.renderExecTable(snapshot.parsedData, this.currentPendingPlacas || []);
+        } else {
+          uiBuilder.setFatalError(true, false, "FALHA DE LIGAÇÃO", "Não foi possível carregar os dados. Verifique sua conexão e clique em Atualizar.");
+        }
+        return;
+      }
+
+      uiBuilder.setFatalError(false);
       const parsedData = dataParser.parse(rawValues);
       if (historicoRaw) uiBuilder.setHistoricoCargas(historicoRaw);
       if (rncRaw) uiBuilder.setRncCargas(dataParser.parseRnc(rncRaw));
-      
-      let lotesMap = null; 
+
+      let lotesMap = null;
       if (rawEstoque) {
         try {
           lotesMap = dataParser.parseEstoque(rawEstoque);
         } catch(e) { console.warn('[REFRESH] parseEstoque falhou:', e.message); }
       }
-      
-      this.lastParsedData = parsedData; 
+
+      this.lastParsedData = parsedData;
       uiBuilder.localDataStore = parsedData;
       uiBuilder.buildDataIndexes(parsedData);
-      
+
       if (lotesMap && Object.keys(lotesMap).length > 0) {
-          uiBuilder.lotesMap = lotesMap;
-          uiBuilder.buildLotesIndex(lotesMap);
-          perdasController.populateProdutos(lotesMap); 
+        uiBuilder.lotesMap = lotesMap;
+        uiBuilder.buildLotesIndex(lotesMap);
+        perdasController.populateProdutos(lotesMap);
       }
 
-this.currentPendingPlacas = [];
+      await submissionManager.refreshPendingState();
       this.bumpDataRevision('full-refresh');
 
-      uiBuilder.populateSelects(parsedData, uiBuilder.lotesMap); 
+      uiBuilder.populateSelects(parsedData, uiBuilder.lotesMap);
       dashboardEngine.renderBanners(parsedData);
       dashboardEngine.renderExecTable(parsedData, this.currentPendingPlacas);
       this.persistWarmSnapshot();
-      
+
       uiBuilder.updateTimestamp();
       uiBuilder.updateGlobalUpdateTimestamp();
       logPerf('[QUERY] Carga completa inicial', startedAt, `${parsedData.length} registros`);
 
     } catch (error) {
-      console.error('[REFRESH] Erro:', error);
-      uiBuilder.setFatalError(true, false, "FALHA DE LIGAÇÃO", "Não foi possível carregar os dados. Verifique sua conexão.");
-      } finally { uiBuilder.toggleLoader(false); this.refreshPromise = null; }
+      console.error('[REFRESH] Erro inesperado:', error);
+      const snapshot = warmSnapshotManager.read();
+      if (snapshot && snapshot.parsedData && snapshot.parsedData.length > 0) {
+        uiBuilder.setFatalError(true, true, "DADOS EM CACHE", "Erro ao conectar. Exibindo dados do último acesso. Clique em Atualizar para tentar novamente.");
+      } else {
+        uiBuilder.setFatalError(true, false, "FALHA DE LIGAÇÃO", "Não foi possível carregar os dados. Verifique sua conexão e clique em Atualizar.");
+      }
+    } finally { uiBuilder.toggleLoader(false); this.refreshPromise = null; }
     })();
     return this.refreshPromise;
   },
@@ -5162,167 +5360,148 @@ async submitFinal(statusLiberacao) {
       if(btnBloquear) { btnBloquear.disabled = false; btnBloquear.textContent = '⛔ REGISTRAR VEÍCULO BLOQUEADO'; }
     };
     
-    const usuarioNomeCompleto = await userIdentityManager.ensureReady();
-    const placaSelecionada = document.getElementById('selPlacaBusca').value;
-    if(!placaSelecionada) {
-      garantirReabilitacao();
-      this.isSubmitting = false;
-      return alert("⚠️ Selecione a Placa da carga antes de finalizar.");
-    }
-
-    // Barreira 1 — bloqueio comercial/financeiro do pedido
-    const itemsCargaCheck = uiBuilder.dataIndexes.byPlaca.get(placaSelecionada) || [];
-    const bloqueiosAtivos = itemsCargaCheck.filter(i => i.bloqueio && i.bloqueio.trim() !== '' && i.bloqueio.toUpperCase() !== 'LIBERADO');
-    if (bloqueiosAtivos.length > 0) {
-      garantirReabilitacao();
-      this.isSubmitting = false;
-      const tipos = [...new Set(bloqueiosAtivos.map(i => i.bloqueio.trim()))].join(', ');
-      return alert(`🚫 ENVIO BLOQUEADO\n\nEste pedido possui bloqueio ativo: ${tipos}\n\nDirija-se à recepção e comunique o responsável pelo faturamento.`);
-    }
-
-    // Barreira 2 — duplicidade: força leitura mais recente do histórico para reduzir bypass por cache local.
-    if (navigator.onLine) {
-      const historicoAtual = await apiService.fetchHistoricoData().catch(() => null);
-      if (historicoAtual) uiBuilder.setHistoricoCargas(historicoAtual);
-    }
-
-    // Barreira 3 — duplicidade: placa já teve checklist enviado hoje (verificação FORÇADA com dados do servidor)
-    const placaInp = normalizePlaca(document.getElementById('inpPlaca').value || '');
-    if (!placaInp) {
-      garantirReabilitacao();
-      this.isSubmitting = false;
-      return alert("⚠️ Placa inválida. Preencha a placa do veículo.");
-    }
-
-    // Forçar verificação em tempo real com o histórico mais recente do servidor
-    let historicoVerificacao = uiBuilder.historicoCargas || [];
-    if (navigator.onLine) {
-      try {
-        const historicoRecente = await apiService.fetchHistoricoData();
-        if (historicoRecente && historicoRecente.length > 0) {
-          historicoVerificacao = historicoRecente;
-          uiBuilder.setHistoricoCargas(historicoRecente);
-        }
-      } catch (e) {
-        console.warn('[DUPLICIDADE] Falha ao buscar histórico fresh:', e);
-      }
-    }
-
-    // Verificar duplicidade no histórico carregado
-    const jaCarregouHoje = uiBuilder.verificarDuplicidadeNoHistorico(placaInp, historicoVerificacao);
-    if (jaCarregouHoje) {
-      return alert(`⚠️ DUPLICIDADE BLOQUEADA\n\nUm checklist para a placa "${placaInp}" já foi registrado hoje no sistema.\n\nPara evitar duplicidade, um novo envio não é permitido.\nEm caso de correção, consulte o responsável pelo faturamento.`);
-    }
-
-    const itemsCarga = uiBuilder.dataIndexes.byPlaca.get(placaSelecionada) || [];
-    const cli = [...new Set(itemsCarga.map(i => i.cliente))].join(' | ');
-    const ped = [...new Set(itemsCarga.map(i => i.pedido))].join(' | ');
-
-    let missingCheck = false;
-    config.checklist.forEach(c => { if(c.type !== 'text' && !document.querySelector(`input[name="chk_${c.id}"]:checked`)) missingCheck = true; });
-    if(missingCheck) {
-      garantirReabilitacao();
-      this.isSubmitting = false;
-      return alert("⚠️ Por favor, responda a todos os itens do Checklist de Segurança.");
-    }
-
-    const base64Frente = document.getElementById('base64Frente').value;
-    const base64Traseira = document.getElementById('base64Traseira').value;
-    const base64Assoalho = document.getElementById('base64Assoalho').value;
-
-    const payload = {
-      tipo: "OPERACAO", status: statusLiberacao, dataHora: new Date().toLocaleString('pt-BR'),
-      acompanhamento: usuarioNomeCompleto, usuarioNomeCompleto, cliente: cli, pedido: ped, produto: '', quantidadeTotal: 0,
-      placa: document.getElementById('inpPlaca').value, motorista: document.getElementById('inpMotorista').value,
-      placaNormalizada: placaInp,
-      dataOperacao: dateStampBR(),
-      tipoChecklist: 'OPERACAO',
-      statusChecklist: checklistGuardManager.checklistStatus.EM_ENVIO,
-      obs: document.getElementById('inpObs').value, linhasOperacao: [], checklist: {},
-      fotos: {
-          frente: base64Frente,
-          traseira: base64Traseira,
-          assoalho: base64Assoalho
-      }
-    };
-
-    let hasMaterial = false;
-    for(let i=1; i<=10; i++) {
-      const p = document.getElementById(`selProd_${i}`).value;
-      const q = parseBRNumber(document.getElementById(`inpQtd_${i}`).value);
-      // ATUALIZADO: Preferir dataset.lote (confirmado) se existir, senão usar value
-      const loteInput = document.getElementById(`selLote_${i}`);
-      const l = (loteInput?.dataset?.lote || loteInput?.value || '').trim() || 'S/ Lote';
-      const qPerda = parseBRNumber(document.getElementById(`inpPerda_${i}`).value); 
-      const mPerda = document.getElementById(`selMotivo_${i}`).value;
-      if (q < 0 || qPerda < 0) { garantirReabilitacao(); this.isSubmitting = false; return alert(`⛔ Valores negativos não permitidos (Linha ${i}).`); }
-      if(p && (q > 0 || qPerda > 0)) {
-        hasMaterial = true; 
-        if (!payload.produto) payload.produto = p;
-        if(qPerda > 0 && !mPerda) { garantirReabilitacao(); this.isSubmitting = false; return alert(`⛔ Informe o motivo da perda na (Linha ${i}).`); }
-        payload.quantidadeTotal += q; 
-        payload.linhasOperacao.push({ produto: p, quantidade: q, lote: l, perda: qPerda, motivoPerda: mPerda || "-" });
-      }
-    }
-    
-    if(!hasMaterial) { garantirReabilitacao(); this.isSubmitting = false; return alert("⚠️ Informe a quantidade carregada de pelo menos um produto."); }
-
-    config.checklist.forEach(c => {
-      payload.checklist[c.lbl] = c.type === 'text' 
-        ? (document.getElementById(`chk_text_${c.id}`).value || 'Sem observações adicionais') 
-        : document.querySelector(`input[name="chk_${c.id}"]:checked`).value;
-    });
-
-    // Validação robusta de duplicidade via hash + fila local + backend (quando suportado).
-    const guard = await checklistGuardManager.validarAntesDoEnvio(payload);
-    payload.hashChecklist = guard.hashChecklist;
-    if (guard.duplicate?.duplicated) {
-      garantirReabilitacao();
-      this.isSubmitting = false;
-      alert(
-        `⚠️ DUPLICIDADE BLOQUEADA\n\n` +
-        `${guard.duplicate.reason}\n\n` +
-        `Placa: ${guard.placaNormalizada}\n` +
-        `Usuário: ${guard.duplicate.lockedBy || 'Não informado'}\n` +
-        `Data/Hora: ${formatDateTimeBR(guard.duplicate.occurredAt || Date.now())}\n` +
-        `Status: ${guard.duplicate.status || checklistGuardManager.checklistStatus.FINALIZADO}`
-      );
-      alertManager.notifySystem('duplicidade', `Envio bloqueado por duplicidade da placa ${guard.placaNormalizada}.`);
-      return;
-    }
-
-    this.isSubmitting = true; 
-    uiBuilder.toggleLoader(true, "Enviando dados e fotos...");
-    
     try {
-      const resp = await apiService.sendDataToAppScript(payload);
-      if(resp && resp.success) {
-        payload.statusChecklist = checklistGuardManager.checklistStatus.SINCRONIZADO;
-        checklistGuardManager.registrarChecklistFinalizado({
-          placaNormalizada: payload.placaNormalizada,
-          dataOperacao: payload.dataOperacao,
-          tipoChecklist: payload.tipoChecklist,
-          hashChecklist: payload.hashChecklist,
-          usuarioNomeCompleto,
-          status: payload.statusChecklist
-        });
-        await checklistGuardManager.unlockChecklistPorPlaca(payload.placaNormalizada, { status: checklistGuardManager.checklistStatus.SINCRONIZADO });
-        alert("✅ SUCESSO! Registro integrado à planilha.");
-        uiBuilder.clearDependentFields(); 
-        document.getElementById('selPlacaBusca').value = '';
-        uiBuilder.updateGlobalUpdateTimestamp();
-        this.silentRefresh(); 
-      } else {
-        payload.statusChecklist = checklistGuardManager.checklistStatus.CANCELADO;
-        alert("❌ ERRO DO SCRIPT:\n\n" + (resp.message || "Erro desconhecido."));
+      const usuarioNomeCompleto = await userIdentityManager.ensureReady();
+      const placaSelecionada = document.getElementById('selPlacaBusca').value;
+      if(!placaSelecionada) {
+        return alert("⚠️ Selecione a Placa da carga antes de finalizar.");
       }
-    } catch(err) { 
-      payload.statusChecklist = checklistGuardManager.checklistStatus.CANCELADO;
-      console.error('[SUBMIT] Erro no envio:', err);
-      alert("❌ FALHA NA CONEXÃO\n\nNão foi possível enviar o registro. Verifique sua conexão com a internet e tente novamente.\n\nO sistema não permiteenvio offline para evitar duplicidade de checklists.");
-    } finally { 
-      await checklistGuardManager.unlockChecklistPorPlaca(payload.placaNormalizada, { silent: true }).catch(() => {});
-      this.isSubmitting = false; uiBuilder.toggleLoader(false); 
+
+      const itemsCargaCheck = uiBuilder.dataIndexes.byPlaca.get(placaSelecionada) || [];
+      const bloqueiosAtivos = itemsCargaCheck.filter(i => i.bloqueio && i.bloqueio.trim() !== '' && i.bloqueio.toUpperCase() !== 'LIBERADO');
+      if (bloqueiosAtivos.length > 0) {
+        const tipos = [...new Set(bloqueiosAtivos.map(i => i.bloqueio.trim()))].join(', ');
+        return alert(`🚫 ENVIO BLOQUEADO\n\nEste pedido possui bloqueio ativo: ${tipos}\n\nDirija-se à recepção e comunique o responsável pelo faturamento.`);
+      }
+
+      if (navigator.onLine) {
+        const historicoAtual = await apiService.fetchHistoricoData().catch(() => null);
+        if (historicoAtual) uiBuilder.setHistoricoCargas(historicoAtual);
+      }
+
+      const placaInp = normalizePlaca(document.getElementById('inpPlaca').value || '');
+      if (!placaInp) {
+        return alert("⚠️ Placa inválida. Preencha a placa do veículo.");
+      }
+
+      let historicoVerificacao = uiBuilder.historicoCargas || [];
+      if (navigator.onLine) {
+        try {
+          const historicoRecente = await apiService.fetchHistoricoData();
+          if (historicoRecente && historicoRecente.length > 0) {
+            historicoVerificacao = historicoRecente;
+            uiBuilder.setHistoricoCargas(historicoRecente);
+          }
+        } catch (e) {
+          console.warn('[DUPLICIDADE] Falha ao buscar histórico fresh:', e);
+        }
+      }
+
+      const itemsCarga = uiBuilder.dataIndexes.byPlaca.get(placaSelecionada) || [];
+      const cli = [...new Set(itemsCarga.map(i => i.cliente))].join(' | ');
+      const ped = [...new Set(itemsCarga.map(i => i.pedido))].join(' | ');
+      const uniqueChecklistKey = buildChecklistUniqueKey({ placaNormalizada: placaInp, pedido: ped, dataOperacao: dateStampBR() });
+
+      const jaCarregouHoje = uiBuilder.verificarDuplicidadeNoHistorico(placaInp, historicoVerificacao, ped);
+      if (jaCarregouHoje) {
+        return alert(`⚠️ DUPLICIDADE BLOQUEADA\n\nJá existe checklist enviado hoje para a placa "${placaInp}" com o pedido "${ped}".`);
+      }
+
+      let missingCheck = false;
+      config.checklist.forEach(c => { if(c.type !== 'text' && !document.querySelector(`input[name="chk_${c.id}"]:checked`)) missingCheck = true; });
+      if(missingCheck) {
+        return alert("⚠️ Por favor, responda a todos os itens do Checklist de Segurança.");
+      }
+
+      const base64Frente = document.getElementById('base64Frente').value;
+      const base64Traseira = document.getElementById('base64Traseira').value;
+      const base64Assoalho = document.getElementById('base64Assoalho').value;
+
+      const payload = {
+        tipo: "OPERACAO", status: statusLiberacao, dataHora: new Date().toLocaleString('pt-BR'),
+        acompanhamento: usuarioNomeCompleto, usuarioNomeCompleto, cliente: cli, pedido: ped, produto: '', quantidadeTotal: 0,
+        placa: document.getElementById('inpPlaca').value, motorista: document.getElementById('inpMotorista').value,
+        placaNormalizada: placaInp,
+        dataOperacao: dateStampBR(),
+        tipoChecklist: 'OPERACAO',
+        statusChecklist: checklistGuardManager.checklistStatus.EM_ENVIO,
+        uniqueChecklistKey,
+        idempotencyKey: buildChecklistIdempotencyKey({ placaNormalizada: placaInp, pedido: ped, dataOperacao: dateStampBR() }),
+        obs: document.getElementById('inpObs').value, linhasOperacao: [], checklist: {},
+        fotos: {
+            frente: base64Frente,
+            traseira: base64Traseira,
+            assoalho: base64Assoalho
+        }
+      };
+
+      let hasMaterial = false;
+      for(let i=1; i<=10; i++) {
+        const p = document.getElementById(`selProd_${i}`).value;
+        const q = parseBRNumber(document.getElementById(`inpQtd_${i}`).value);
+        const loteInput = document.getElementById(`selLote_${i}`);
+        const l = (loteInput?.dataset?.lote || loteInput?.value || '').trim() || 'S/ Lote';
+        const qPerda = parseBRNumber(document.getElementById(`inpPerda_${i}`).value);
+        const mPerda = document.getElementById(`selMotivo_${i}`).value;
+        if (q < 0 || qPerda < 0) return alert(`⛔ Valores negativos não permitidos (Linha ${i}).`);
+        if(p && (q > 0 || qPerda > 0)) {
+          hasMaterial = true;
+          if (!payload.produto) payload.produto = p;
+          if(qPerda > 0 && !mPerda) return alert(`⛔ Informe o motivo da perda na (Linha ${i}).`);
+          payload.quantidadeTotal += q;
+          payload.linhasOperacao.push({ produto: p, quantidade: q, lote: l, perda: qPerda, motivoPerda: mPerda || "-" });
+        }
+      }
+
+      if(!hasMaterial) return alert("⚠️ Informe a quantidade carregada de pelo menos um produto.");
+
+      config.checklist.forEach(c => {
+        payload.checklist[c.lbl] = c.type === 'text'
+          ? (document.getElementById(`chk_text_${c.id}`).value || 'Sem observações adicionais')
+          : document.querySelector(`input[name="chk_${c.id}"]:checked`).value;
+      });
+
+      const guard = await checklistGuardManager.validarAntesDoEnvio(payload);
+      payload.hashChecklist = guard.hashChecklist;
+      payload.uniqueChecklistKey = guard.uniqueChecklistKey;
+      payload.idempotencyKey = guard.idempotencyKey;
+      if (guard.duplicate?.duplicated) {
+        alert(
+          `⚠️ DUPLICIDADE BLOQUEADA\n\n` +
+          `${guard.duplicate.reason}\n\n` +
+          `Placa: ${guard.placaNormalizada}\n` +
+          `Pedido: ${payload.pedido}\n` +
+          `Usuário: ${guard.duplicate.lockedBy || 'Não informado'}\n` +
+          `Data/Hora: ${formatDateTimeBR(guard.duplicate.occurredAt || Date.now())}\n` +
+          `Status: ${guard.duplicate.status || checklistGuardManager.checklistStatus.FINALIZADO}`
+        );
+        alertManager.notifySystem('duplicidade', `Envio bloqueado por duplicidade da placa ${guard.placaNormalizada}.`);
+        return;
+      }
+
+      await submissionManager.enqueue(payload);
+
+      uiBuilder.clearDependentFields();
+      document.getElementById('selPlacaBusca').value = '';
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      const dashBtn = document.querySelector('.tab-btn:nth-child(3)');
+      if (dashBtn) dashBtn.classList.add('active');
+      const dashContent = document.getElementById('tab-dash');
+      if (dashContent) dashContent.classList.add('active');
+
+      cleanupManager._toast('📤 Checklist aceito para processamento. Você já pode seguir para a tela inicial.', 'info', 12000);
+      submissionManager.processPendingQueue({ silent: false }).catch((error) => {
+        console.error('[SUBMIT] Falha no processamento em segundo plano:', error);
+      });
+    } catch (error) {
+      console.error('[SUBMIT] Falha antes do enfileiramento:', error);
+      alert(`❌ Falha ao preparar o envio.\n\n${error?.message || 'Erro inesperado.'}`);
+    } finally {
+      this.isSubmitting = false;
+      garantirReabilitacao();
+      queueManager.render().catch(() => {});
+      submissionManager.refreshPendingState().catch(() => {});
     }
   }
 };

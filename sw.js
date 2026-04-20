@@ -12,7 +12,6 @@ const MAX_RUNTIME_ENTRIES = 120;
 
 // PRECACHE_ASSETS: lista mínima, com verificação de existência
 const PRECACHE_ASSETS = [
-  './offline.html',
   './manifest.webmanifest',
   './icons/icon.svg'
 ];
@@ -165,36 +164,9 @@ self.addEventListener('fetch', (event) => {
         if (cached) return cached;
       } catch (_) {}
 
-      if (event.request.mode === 'navigate') {
-        try {
-          const fallback = await caches.match('./offline.html');
-          if (fallback) return fallback;
-        } catch (_) {}
-      }
-
       return new Response('', { status: 503 });
     }
   })());
-});
-
-self.addEventListener('sync', (event) => {
-  if (event.tag === 'cysy-sync-pending') {
-    event.waitUntil((async () => {
-      const clients = await self.clients.matchAll({ includeUncontrolled: true, type: 'window' });
-      clients.forEach((client) => client.postMessage({ type: 'SYNC_PENDING_REQUEST' }));
-    })());
-  }
-});
-
-self.addEventListener('periodicsync', (event) => {
-  if (event.tag === 'cysy-periodic-sync') {
-    event.waitUntil((async () => {
-      await removeLegacyCaches();
-      await pruneRuntimeCache();
-      const clients = await self.clients.matchAll({ includeUncontrolled: true, type: 'window' });
-      clients.forEach((client) => client.postMessage({ type: 'PERIODIC_SYNC_TICK' }));
-    })());
-  }
 });
 
 self.addEventListener('message', (event) => {
